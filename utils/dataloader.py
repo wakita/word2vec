@@ -6,144 +6,78 @@ from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
 from torchtext.datasets import WikiText2, WikiText103
 
-from utils.constants import (
-    CBOW_N_WORDS,
-    SKIPGRAM_N_WORDS,
-    MIN_WORD_FREQUENCY,
-    MAX_SEQUENCE_LENGTH,
-)
+from utils.constants import CBOW_N_WORDS, SKIPGRAM_N_WORDS, MIN_WORD_FREQUENCY, MAX_SEQUENCE_LENGTH
 
+# 未知語は元々のデータセットに含まれたタグなので変更できない。`wiki.train.tokens` を参照のこと。
+UNKNOWN_TOKEN = '<unk>'
 
 def get_english_tokenizer():
-    """
-    Documentation:
-    https://pytorch.org/text/stable/_modules/torchtext/data/utils.html#get_tokenizer
-    """
-    tokenizer = get_tokenizer("basic_english", language="en")
-    return tokenizer
+  return get_tokenizer('basic_english', language='en')
 
 
 def get_data_iterator(ds_name, ds_type, data_dir):
-    if ds_name == "WikiText2":
-        data_iter = WikiText2(root=data_dir, split=(ds_type))
-    elif ds_name == "WikiText103":
-        data_iter = WikiText103(root=data_dir, split=(ds_type))
-    else:
-        raise ValueError("Choose dataset from: WikiText2, WikiText103")
-    data_iter = to_map_style_dataset(data_iter)
-    return data_iter
-
+  cls = WikiText103 if ds_name == 'WikiText103' else WikiText2
+  return to_map_style_dataset(cls(root=data_dir, split=ds_type))
 
 def build_vocab(data_iter, tokenizer):
-    """Builds vocabulary from iterator"""
-    
-    vocab = build_vocab_from_iterator(
-        map(tokenizer, data_iter),
-        specials=["<unk>"],
-        min_freq=MIN_WORD_FREQUENCY,
-    )
-    vocab.set_default_index(vocab["<unk>"])
-    return vocab
+  vocab = build_vocab_from_iterator(map(tokenizer, data_iter),
+                                    specials=[UNKNOWN_TOKEN],
+                                    min_freq=MIN_WORD_FREQUENCY)
+  vocab.set_default_index(vocab[UNKNOWN_TOKEN])
+  return vocab
 
+def collate_cbow(batch, pipeline=None):
+  N_WORDS = CBOW_N_WORDS
 
-def collate_cbow(batch, text_pipeline):
-    """
-    Collate_fn for CBOW model to be used with Dataloader.
-    `batch` is expected to be list of text paragrahs.
-    
-    Context is represented as N=CBOW_N_WORDS past words 
-    and N=CBOW_N_WORDS future words.
-    
-    Long paragraphs will be truncated to contain
-    no more that MAX_SEQUENCE_LENGTH tokens.
-    
-    Each element in `batch_input` is N=CBOW_N_WORDS*2 context words.
-    Each element in `batch_output` is a middle word.
-    """
-    batch_input, batch_output = [], []
-    for text in batch:
-        text_tokens_ids = text_pipeline(text)
+  inputs, outputs = [], []
+  for text in batch:
+    token_ids = pipeline(text)
 
-        if len(text_tokens_ids) < CBOW_N_WORDS * 2 + 1:
-            continue
+    if len(token_ids) < N_WORDS * 2 + 1: continue
 
-        if MAX_SEQUENCE_LENGTH:
-            text_tokens_ids = text_tokens_ids[:MAX_SEQUENCE_LENGTH]
+    if MAX_SEQUENCE_LENGTH: token_ids = token_ids[:MAX_SEQUENCE_LENGTH]
 
-        for idx in range(len(text_tokens_ids) - CBOW_N_WORDS * 2):
-            token_id_sequence = text_tokens_ids[idx : (idx + CBOW_N_WORDS * 2 + 1)]
-            output = token_id_sequence.pop(CBOW_N_WORDS)
-            input_ = token_id_sequence
-            batch_input.append(input_)
-            batch_output.append(output)
+    for idx in range(len(token_ids) - N_WORDS * 2):
+      context = token_ids[idx : (idx + N_WORDS * 2 + 1)]
+      token_id = context.pop(N_WORDS)
+      inputs.append(context)
+      outputs.append(token_id)
 
-    batch_input = torch.tensor(batch_input, dtype=torch.long)
-    batch_output = torch.tensor(batch_output, dtype=torch.long)
-    return batch_input, batch_output
+  return torch.tensor(inputs, dtype=torch.long), torch.tensor(outputs, dtype=torch.long)
 
+def collate_skipgram(batch, pipeline=None):
+  N_WORDS = SKIPGRAM_N_WORDS
 
-def collate_skipgram(batch, text_pipeline):
-    """
-    Collate_fn for Skip-Gram model to be used with Dataloader.
-    `batch` is expected to be list of text paragrahs.
-    
-    Context is represented as N=SKIPGRAM_N_WORDS past words 
-    and N=SKIPGRAM_N_WORDS future words.
-    
-    Long paragraphs will be truncated to contain
-    no more that MAX_SEQUENCE_LENGTH tokens.
-    
-    Each element in `batch_input` is a middle word.
-    Each element in `batch_output` is a context word.
-    """
-    batch_input, batch_output = [], []
-    for text in batch:
-        text_tokens_ids = text_pipeline(text)
+  inputs, outputs = [], []
+  for text in batch:
+    token_ids = pipeline(text)
 
-        if len(text_tokens_ids) < SKIPGRAM_N_WORDS * 2 + 1:
-            continue
+    if len(token_ids) < N_WORDS * 2 + 1: continue
 
-        if MAX_SEQUENCE_LENGTH:
-            text_tokens_ids = text_tokens_ids[:MAX_SEQUENCE_LENGTH]
+    if MAX_SEQUENCE_LENGTH: token_ids = token_ids[:MAX_SEQUENCE_LENGTH]
 
-        for idx in range(len(text_tokens_ids) - SKIPGRAM_N_WORDS * 2):
-            token_id_sequence = text_tokens_ids[idx : (idx + SKIPGRAM_N_WORDS * 2 + 1)]
-            input_ = token_id_sequence.pop(SKIPGRAM_N_WORDS)
-            outputs = token_id_sequence
+    for idx in range(len(token_ids) - N_WORDS * 2):
+      context = token_ids[idx : (idx + N_WORDS * 2 + 1)]
+      token_id = context.pop(N_WORDS)
+      for context_token_id in context:
+        inputs.append(token_id)
+        outputs.append(context_token_id)
 
-            for output in outputs:
-                batch_input.append(input_)
-                batch_output.append(output)
+    return torch.tensor(inputs, dtype=torch.long), torch.tensor(outputs, dtype=torch.long)
 
-    batch_input = torch.tensor(batch_input, dtype=torch.long)
-    batch_output = torch.tensor(batch_output, dtype=torch.long)
-    return batch_input, batch_output
+def get_dataloader_and_vocab(model_name='', ds_name='', ds_type='', data_dir='', batch_size='', shuffle=True, vocab=None, **other):
+  data_iter = get_data_iterator(ds_name, ds_type, data_dir)
+  print(f'{model_name}/{ds_type}: #{len(data_iter)}, batch_size: {batch_size}')
 
+  tokenizer = get_english_tokenizer()
 
-def get_dataloader_and_vocab(
-    model_name, ds_name, ds_type, data_dir, batch_size, shuffle, vocab=None
-):
+  if not vocab: vocab = build_vocab(data_iter, tokenizer)
 
-    data_iter = get_data_iterator(ds_name, ds_type, data_dir)
-    tokenizer = get_english_tokenizer()
+  pipeline = lambda x: vocab(tokenizer(x))
+  collate_fn = collate_cbow if model_name == 'cbow' else collate_skipgram
 
-    if not vocab:
-        vocab = build_vocab(data_iter, tokenizer)
-        
-    text_pipeline = lambda x: vocab(tokenizer(x))
-
-    if model_name == "cbow":
-        collate_fn = collate_cbow
-    elif model_name == "skipgram":
-        collate_fn = collate_skipgram
-    else:
-        raise ValueError("Choose model from: cbow, skipgram")
-
-    dataloader = DataLoader(
-        data_iter,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        collate_fn=partial(collate_fn, text_pipeline=text_pipeline),
-    )
-    return dataloader, vocab
-    
+  return (DataLoader(data_iter,
+                     batch_size=batch_size,
+                     shuffle=shuffle,
+                     collate_fn=partial(collate_fn, pipeline=pipeline)),
+          vocab if vocab else build_vocab(data_iter, tokenizer))

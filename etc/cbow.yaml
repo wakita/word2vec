@@ -1,0 +1,17 @@
+model_name: cbow
+dataset: WikiText2
+
+data_dir: data
+
+train:
+  batch_size: 96
+  steps:
+
+valid:
+  batch_size: 96
+  steps:
+
+optimizer: Adam
+learning_rate: 0.025
+epochs: 5
+checkpoint_frequency:

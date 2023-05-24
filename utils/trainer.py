@@ -2,119 +2,86 @@ import os
 import numpy as np
 import json
 import torch
-
+from torchinfo import summary
+from tensorboardX import SummaryWriter
 
 class Trainer:
-    """Main class for model training"""
-    
-    def __init__(
-        self,
-        model,
-        epochs,
-        train_dataloader,
-        train_steps,
-        val_dataloader,
-        val_steps,
-        checkpoint_frequency,
-        criterion,
-        optimizer,
-        lr_scheduler,
-        device,
-        model_dir,
-        model_name,
-    ):  
-        self.model = model
-        self.epochs = epochs
-        self.train_dataloader = train_dataloader
-        self.train_steps = train_steps
-        self.val_dataloader = val_dataloader
-        self.val_steps = val_steps
-        self.criterion = criterion
-        self.optimizer = optimizer
-        self.checkpoint_frequency = checkpoint_frequency
-        self.lr_scheduler = lr_scheduler
-        self.device = device
-        self.model_dir = model_dir
-        self.model_name = model_name
+  def __init__(self, config):
+    C = self.C = config
+    self.loss = {'train': [], 'valid': []}
+    self.writer = SummaryWriter(C['run_dir'])
 
-        self.loss = {"train": [], "val": []}
-        self.model.to(self.device)
+  def train(self):
+    C = self.C
+    for epoch in range(C['epochs']):
+      self.writer.add_scalar('learning_rate', C['lr_scheduler'].get_last_lr(), epoch)
+      self._train_epoch(epoch)
+      self._validate_epoch(epoch)
+      train_loss, valid_loss = self.loss['train'][-1], self.loss['valid'][-1]
+      print(f'Epoch: {epoch + 1}/{C["epochs"]}, Train Loss={train_loss:.5f}, Valid Loss={valid_loss:.5f}')
 
-    def train(self):
-        for epoch in range(self.epochs):
-            self._train_epoch()
-            self._validate_epoch()
-            print(
-                "Epoch: {}/{}, Train Loss={:.5f}, Val Loss={:.5f}".format(
-                    epoch + 1,
-                    self.epochs,
-                    self.loss["train"][-1],
-                    self.loss["val"][-1],
-                )
-            )
+      C['lr_scheduler'].step()
+      if C['checkpoint_frequency']: self._save_checkpoint(epoch)
+      print()
 
-            self.lr_scheduler.step()
+  def _train_epoch(self, epoch):
+    C = self.C
+    train_dataloader = C['train_dataloader']
+    device, model, optimizer, criterion = C['device'], C['model'], C['optimizer'], C['criterion']
+    steps = C['train']['steps']
 
-            if self.checkpoint_frequency:
-                self._save_checkpoint(epoch)
+    model.train()
+    running_loss = []
 
-    def _train_epoch(self):
-        self.model.train()
-        running_loss = []
+    for i, (inputs, labels) in enumerate(train_dataloader, 1):
+      if epoch == 0 and i == 0:
+        summary(model, input_data=inputs, col_names=['input_size', 'output_size', 'num_params'])
+        print()
 
-        for i, batch_data in enumerate(self.train_dataloader, 1):
-            inputs = batch_data[0].to(self.device)
-            labels = batch_data[1].to(self.device)
+      inputs, labels = inputs.to(device), labels.to(device)
 
-            self.optimizer.zero_grad()
-            outputs = self.model(inputs)
-            loss = self.criterion(outputs, labels)
-            loss.backward()
-            self.optimizer.step()
+      optimizer.zero_grad()
+      loss = criterion(model(inputs), labels)
+      loss.backward()
+      running_loss.append(loss.item())
+      optimizer.step()
 
-            running_loss.append(loss.item())
+      if i == steps: break
 
-            if i == self.train_steps:
-                break
+    self.loss['train'].append(np.mean(running_loss))
+    self.writer.add_scalar('loss/train', self.loss['train'][-1], epoch)
 
-        epoch_loss = np.mean(running_loss)
-        self.loss["train"].append(epoch_loss)
+  def _validate_epoch(self, epoch):
+    C = self.C
+    valid_dataloader = C['valid_dataloader']
+    device, model, criterion = C['device'], C['model'], C['criterion']
+    steps = C['valid']['steps']
 
-    def _validate_epoch(self):
-        self.model.eval()
-        running_loss = []
+    model.eval()
+    running_loss = []
 
-        with torch.no_grad():
-            for i, batch_data in enumerate(self.val_dataloader, 1):
-                inputs = batch_data[0].to(self.device)
-                labels = batch_data[1].to(self.device)
+    with torch.no_grad():
+      for i, (inputs, labels) in enumerate(valid_dataloader, 1):
+        inputs, labels = inputs.to(device), labels.to(device)
 
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, labels)
+        loss = criterion(model(inputs), labels)
+        running_loss.append(loss.item())
 
-                running_loss.append(loss.item())
+        if i == steps: break
 
-                if i == self.val_steps:
-                    break
+    self.loss['valid'].append(np.mean(running_loss))
+    self.writer.add_scalar('loss/valid', self.loss['valid'][-1], epoch)
 
-        epoch_loss = np.mean(running_loss)
-        self.loss["val"].append(epoch_loss)
+  def _save_checkpoint(self, epoch):
+    epoch_num = epoch + 1
+    if epoch_num % self.C['checkpoint_frequency'] == 0:
+      model_path = os.path.join(self.C['run_dir'], f'checkpoint_{epoch_num:03d}.pt')
+      torch.save(self.C['model'], model_path)
 
-    def _save_checkpoint(self, epoch):
-        """Save model checkpoint to `self.model_dir` directory"""
-        epoch_num = epoch + 1
-        if epoch_num % self.checkpoint_frequency == 0:
-            model_path = "checkpoint_{}.pt".format(str(epoch_num).zfill(3))
-            model_path = os.path.join(self.model_dir, model_path)
-            torch.save(self.model, model_path)
+  def save_model(self):
+    model_path = os.path.join(self.C['run_dir'], 'model.pt')
+    torch.save(self.C['model'], model_path)
 
-    def save_model(self):
-        """Save final model to `self.model_dir` directory"""
-        model_path = os.path.join(self.model_dir, "model.pt")
-        torch.save(self.model, model_path)
-
-    def save_loss(self):
-        """Save train/val loss as json file to `self.model_dir` directory"""
-        loss_path = os.path.join(self.model_dir, "loss.json")
-        with open(loss_path, "w") as fp:
-            json.dump(self.loss, fp)
+  def save_loss(self):
+    loss_path = os.path.join(self.C['run_dir'], 'loss.json')
+    with open(loss_path, 'w') as w: json.dump(self.loss, w)
