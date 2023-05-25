@@ -1,7 +1,5 @@
-jupyterlab
 pandas
 portalocker
-spacy
 tensorboard
 tensorboardX
 torch
